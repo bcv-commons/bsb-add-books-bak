@@ -17,8 +17,9 @@ Writes export/<project>/_learn/packs/<code>NNN.pkg.md (git-ignored, like the ver
 
 Levels by the project's mode (scripts/modes.py):
   known    lean: the line header, each token's number and Hebrew word (a function word with its gloss), and `had:`
-           (the project's renderings and the store's decisions); no content-word glosses, morphology, referents, BSB
-           words or speech marks. Measured on Danish Gen 28:
+           (the project's renderings and the store's decisions), and the speech marks (who speaks, quotations inside
+           quotations: punctuation the model can't see in the Hebrew); no content-word glosses, morphology, referents or
+           BSB words. Measured on Danish Gen 28:
            the fuller packages changed neither chrF nor the alignment against the lean need (the numbers, for tagging)
   partial  the full package: glosses, verb forms, referents, BSB words, speech, `had:`
   unknown  the full package, and the NT's words through the LXX bridge
@@ -233,7 +234,7 @@ def build(pname, code, ch, level=None):
         return f"{(t['english'] or t['gloss'] or '').replace(' ', '_')}{('(' + str(t['n']) + ('' if t['v'] == cur_v else ' v' + str(t['v'])) + ')') if here else ''}"
 
     out = [f"# {book} {ch}: clause packages ({lay} layout, level {level}). Write your words with these numbers: word^n.",
-           ("# Per line: §verse.line L(level) rule / tokens: n Hebrew (function words with a gloss) / had: this "
+           ("# Per line: §verse.line L(level) rule [speech] / tokens: n Hebrew (function words with a gloss) / had: this "
             "project's renderings (count) and the store's decisions" if lean else
             "# Per line: §verse.line L(level) rule / tokens: n Hebrew gloss [morph; ref=referent] / BSB words^n /"
             " had: this project's renderings (count), store decisions, OT: the edition's own OT (the human text; its"
@@ -269,7 +270,7 @@ def build(pname, code, ch, level=None):
                 names.append(q["speaker"] or "?")
                 qid = q["parent"]
             return names
-    if seg_of and not lean:
+    if seg_of:
         out[2:2] = ["# Speech: [speech: X] a quotation by X; [speech 2: Y, inside X's] Y quoted inside X's speech (inner"
                     " quotation marks). From the Hebrew Bible Speaker Layer (bcv-commons, CC BY 4.0; with Clear Bible's MACULA"
                     " Quotation and Speaker Data, CC BY 4.0, and SIL Glyssen, MIT)."] + (
@@ -309,7 +310,7 @@ def build(pname, code, ch, level=None):
         lev = line_of.get(group[0]["key"], (None, None))[1]
         cl = con.execute("select rule from nodes where id=?", (group[0]["clause"] or group[-1]["clause"],)).fetchone()
         out.append((f"§{v}.{k} L{'' if lev is None else lev} {cl['rule'] if cl and cl['rule'] else ''}".rstrip())
-                   + ("" if lean else speaking(group)))
+                   + speaking(group))
         cells, seen_n = [], set()
         for t in group:
             if t["n"] in seen_n:  # a fused token: one number
