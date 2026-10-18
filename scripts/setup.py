@@ -19,7 +19,7 @@ The Hebrew clause layout can be built three ways, side by side (--heb a,b builds
                         Needs text-fabric; downloads BHSA on first use (build_heb_bhsa.py).
     --heb bcv-query     the bcv-query Hebrew clause layout release (MACULA Hebrew + UHB, with the
                         text-level hierarchy; CC BY-SA 4.0), pinned by tag and SHA-256:
-                        Hugging Face bcv-commons/hebrew-clause-layout v0.22. For everything
+                        Hugging Face bcv-commons/hebrew-clause-layout v0.35. For everything
                         published that carries clause structure (sidecars, clause-line editions);
                         also writes orig/heb-bcv-query-keys/ (MACULA word keys).
     --heb macula        MACULA Hebrew + UHB via the shoresh scaffold API (CC BY / CC BY-SA).
@@ -32,12 +32,14 @@ scripts/relayout.py moves a clause-line draft from one layout to another.
 The prepared source structures (orig/heb.sqlite, orig/grc.sqlite: MACULA Hebrew and Greek with the numbering, the BSB
 tables, referents, frames, speakers; scripts/src.py) come from bcv-query's published cache (v1, pinned SHA-256: three
 downloads instead of about a thousand); the BHSA layout rows and the BGB/RP mapping are added here and never published
-(`src`, last step; `python3 scripts/src.py build` builds them from MACULA instead, with the UBS columns).
+(`src`; `python3 scripts/src.py build` builds them from MACULA instead, with the UBS columns). The speaker layer
+(bcv-commons/hebrew-speaker-layer, CC BY 4.0, pinned tag and SHA-256: who speaks where, quotations inside quotations, frames)
+is added to orig/heb.sqlite after them (`spk`; scripts/src.py speaker-layer); the clause packages show it.
 
 Imported editions with a fetch recipe (a 'fetch:' block in their edition.yaml) are fetched
 only on request, with --only editions (scripts/fetch_edition.py --all).
 
-Usage: python3 scripts/setup.py [--heb bhsa,bcv-query,macula] [--drafting LAYOUT] [--force] [--only bsb,msb,bgb,rp,vrs,src,editions]
+Usage: python3 scripts/setup.py [--heb bhsa,bcv-query,macula] [--drafting LAYOUT] [--force] [--only bsb,msb,bgb,rp,vrs,src,spk,editions]
   --force   download again even if the file is already in download/
   --only    build only the named sources
 Details and licences: docs/sources.md.
@@ -51,10 +53,12 @@ DL = os.path.join(ROOT, "download")
 UA = {"User-Agent": "bsb-add-books-setup/1.0"}
 
 LAYOUTS = {"bhsa": "ETCBC BHSA 2021; CC BY-NC: consulted for drafting, never published",
-           "bcv-query": "bcv-query Hebrew clause layout v0.22; CC BY-SA 4.0",
+           "bcv-query": "bcv-query Hebrew clause layout v0.35; CC BY-SA 4.0",
            "macula": "MACULA Hebrew + UHB via the shoresh API; this takes long"}
-HCL_TAG = "v0.22"                                         # bcv-commons/hebrew-clause-layout
+HCL_TAG = "v0.35"                                         # bcv-commons/hebrew-clause-layout
 HCL_URL = f"https://huggingface.co/datasets/bcv-commons/hebrew-clause-layout/resolve/{HCL_TAG}/hebrew-clause-layout-{HCL_TAG}.tar.gz"
+SPK_TAG = "v0.7"                                          # bcv-commons/hebrew-speaker-layer
+SPK_URL = f"https://huggingface.co/datasets/bcv-commons/hebrew-speaker-layer/resolve/{SPK_TAG}/hebrew-speaker-layer-{SPK_TAG}.tar.gz"
 RP_COMMIT = "27a45ff1b7be6c17ccbfeac414f3f55732ae8e28"     # byztxt/byzantine-majority-text, 2024-12-31
 SRC_V = "v1"  # the prepared source structures, published by bcv-query (built by scripts/src.py; verified row by row)
 SRC_URL = "https://files.qombi.com/files/source-structure-{v}-{f}"
@@ -63,18 +67,20 @@ SOURCES = {
     "msb": ("https://github.com/BSB-publishing/bsb2usfm/releases/download/v5.16/MSB_usj.zip", "MSB_usj.zip"),
     "bgb": ("https://greekbible.org/bgb.docx", "berean/bgb.docx"),
     "hcl": (HCL_URL, f"hebrew-clause-layout/hebrew-clause-layout-{HCL_TAG}.tar.gz"),
+    "spk": (SPK_URL, f"hebrew-speaker-layer/hebrew-speaker-layer-{SPK_TAG}.tar.gz"),
     "rp": (f"https://github.com/byztxt/byzantine-majority-text/archive/{RP_COMMIT}.zip", f"rp-{RP_COMMIT[:12]}.zip"),
     **{f"src-{f}": (SRC_URL.format(v=SRC_V, f=f), f"source-structure-{SRC_V}/source-structure-{SRC_V}-{f}")
        for f in ("heb-open.sqlite.gz", "grc-open.sqlite.gz", "heb-bcv-query.sqlite.gz")},
 }
 SHA256 = {
     "bgb": "56eb9ba026316e6d66d675a4f1812deae362d46244541b9071e937d77d21eac7",
-    "hcl": "624990dd9113d9309300e7755588569a6808774d49f969ecafb2f7c271166640",
+    "hcl": "2b131856790fcdbc8fc0b72deaedbe33a0f1b8e075edef9710b86e86be90b772",
+    "spk": "cf800878986e0023f70c987e99940a7406d808d5db7715926adb79d079d3ff58",
     "src-heb-open.sqlite.gz": "7a3613f19c450746afb304c02f688963c556e3e74fd469caaf27d44e7d70e543",
     "src-grc-open.sqlite.gz": "d707cd1f7ef3e25a0cd6d3008f5ef74d13f7e29bb96e7177b2fa5f281a743611",
     "src-heb-bcv-query.sqlite.gz": "00e3ab016ca5537d66b6a0a2a245428c71c425a3abb6e2d191474b3776c14efc",
 }
-PINNED = {"hcl", "src-heb-open.sqlite.gz", "src-grc-open.sqlite.gz", "src-heb-bcv-query.sqlite.gz"}  # never another file
+PINNED = {"hcl", "spk", "src-heb-open.sqlite.gz", "src-grc-open.sqlite.gz", "src-heb-bcv-query.sqlite.gz"}  # never another file
 
 
 def fetch(key, force):
@@ -159,6 +165,8 @@ def install_src(force):
     con.close()
     if os.path.isdir(os.path.join(ROOT, "orig", "heb-bhsa")):
         run("src.py", "layouts", "--layout", "bhsa")
+    if os.path.isdir(os.path.join(ROOT, "orig", "heb-bcv-query")):  # the cache's rows have v0.22's levels: take the pinned release's
+        run("src.py", "layouts", "--layout", "bcv-query")
     if os.path.isdir(os.path.join(ROOT, "orig", "grc")):
         run("src.py", "map")
     print("  done: the structures are here; the BHSA rows and the mapping were added locally")
@@ -169,7 +177,7 @@ def main():
     force = "--force" in argv
     hebs = argv[argv.index("--heb") + 1].split(",") if "--heb" in argv else []
     drafting = argv[argv.index("--drafting") + 1] if "--drafting" in argv else None
-    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else {"bsb", "msb", "bgb", "rp", "vrs", "src"}
+    only = set(argv[argv.index("--only") + 1].split(",")) if "--only" in argv else {"bsb", "msb", "bgb", "rp", "vrs", "src", "spk"}
     for h in hebs + ([drafting] if drafting else []):
         if h not in LAYOUTS:
             raise SystemExit(f"--heb / --drafting: expected one of {', '.join(LAYOUTS)}, got {h!r}")
@@ -232,6 +240,17 @@ def main():
     if "src" in only:  # last: the BHSA layout rows need orig/heb-bhsa, the mapping orig/grc and orig/grc-rp
         print(f"orig/heb.sqlite, orig/grc.sqlite (prepared source structures {SRC_V}, published by bcv-query)")
         install_src(force)
+    if "spk" in only:  # after src: its segments are the bcv-query layout rows of orig/heb.sqlite
+        print(f"orig/heb.sqlite: the speaker layer (bcv-commons/hebrew-speaker-layer {SPK_TAG}; CC BY 4.0)")
+        if not os.path.exists(os.path.join(ROOT, "orig", "heb.sqlite")):
+            print("  no orig/heb.sqlite yet: run with --only src first")
+        else:
+            import tarfile
+            path = fetch("spk", force)
+            dest = os.path.join(DL, "hebrew-speaker-layer")
+            with tarfile.open(path) as t:
+                t.extractall(dest, filter="data")
+            run("src.py", "speaker-layer", os.path.join(dest, f"hebrew-speaker-layer-{SPK_TAG}"))
     print("\nDone.")
 
 

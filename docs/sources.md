@@ -73,8 +73,8 @@ The Hebrew is optional: `--heb bhsa,bcv-query` builds both clause layouts side b
   clause-line draft with `python3 scripts/relayout.py <draft> --from orig/heb-bhsa --to
   orig/heb-bcv-query`. A commercial user drafts on bcv-query (`--drafting bcv-query`).
 - **The bcv-query Hebrew clause layout** (Hugging Face
-  `bcv-commons/hebrew-clause-layout`, tag **v0.22**, archive SHA-256
-  `624990dd9113d9309300e7755588569a6808774d49f969ecafb2f7c271166640`):
+  `bcv-commons/hebrew-clause-layout`, tag **v0.35** (2026-10-17; v0.22 until then, still available under its tag),
+  archive SHA-256 `2b131856790fcdbc8fc0b72deaedbe33a0f1b8e075edef9710b86e86be90b772`):
   `python3 scripts/setup.py --heb bcv-query` (into `orig/heb-bcv-query/`), or
   `python3 scripts/build_heb_bcvquery.py <unpacked release> [--law] [--out DIR]`.
   - **What it is:** MACULA Hebrew (CC BY 4.0) over the UHB text (CC BY-SA 4.0); the release is
@@ -123,12 +123,22 @@ The Hebrew is optional: `--heb bhsa,bcv-query` builds both clause layouts side b
 - **From:** bcv-query's published cache **source-structure v1** (`https://files.qombi.com/files/source-structure-v1-…`:
   `heb-open.sqlite.gz`, `grc-open.sqlite.gz`, `heb-bcv-query.sqlite.gz`, `manifest.json`, `README.md`; SHA-256 pinned in
   `scripts/setup.py`). Built from MACULA Hebrew `47db250bd55d`, MACULA Greek `8423afe47b9e`, compact-alignments
-  `7982b3d9feda`, full-alignments-manual `1d845bf91390`, hebrew-clause-layout v0.22; verified here row by row against a
+  `7982b3d9feda`, full-alignments-manual `1d845bf91390`, hebrew-clause-layout v0.22 (its bcv-query rows carry v0.22's levels; `setup.py`
+  replaces them from the pinned release when `orig/heb-bcv-query/` is there: the segmentation is the same); verified here row by row against a
   local build of the same pins (2026-10-15: every table identical). New builds come as v2, never over v1. The download
   route allows 8 requests per hour per address.
 - **Licences:** MACULA Hebrew and Greek CC BY 4.0; MACULA Quotation and Speaker Data CC BY 4.0 (Clear Bible) with SIL
   Glyssen / FCBH character data, MIT; compact-alignments and the BSB tables CC0; the bcv-query layout file CC BY-SA 4.0.
   The UBS data in MACULA (SDBH, Louw–Nida) is not in the cache (its columns are empty).
+- **The speaker layer, added here** (`setup.py`, step `spk`; `src.py speaker-layer DIR`): Hugging Face
+  `bcv-commons/hebrew-speaker-layer`, tag **v0.7** (2026-10-17), archive SHA-256
+  `cf800878986e0023f70c987e99940a7406d808d5db7715926adb79d079d3ff58`, **CC BY 4.0** (bcv-commons; built on Clear's MACULA
+  Quotation and Speaker Data, CC BY 4.0, with SIL Glyssen / FCBH character data, MIT). Who speaks where, on the Hebrew: each
+  clause segment of the bcv-query layout with its quotation, level (2+ = a quotation inside a quotation) and speaker, and a
+  chapter's frame (a psalm's psalmist, a memoir's narrator). Tables `speaker_segments` and `speaker_quotations`. The clause
+  packages show it per line (`[speech 2: God, inside Joshua's]`, and a `# Frame` line); without it, Clear's one-level spans.
+  Checked by us against the BHSA text types (its card has the figures): narrative in or out of a quotation 97.7%, its
+  nested quotations right 83%; weakest in the prophets (30% of the reference's nested quotations found).
 - **Added here, never published:** the BHSA layout rows (from `orig/heb-bhsa`) and the BGB/RP mapping
   (`src.py layouts --layout bhsa`, `src.py map`; `setup.py --only src` runs both).
 - **Rebuild from scratch:** `python3 scripts/src.py build` (all OT books) and `src.py build <NT codes>`: about 50 minutes

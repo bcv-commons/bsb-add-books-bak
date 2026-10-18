@@ -5,8 +5,10 @@ its store, and, for a language learnt from its NT, the occurrence index (scripts
 tagged format's verse-local token numbers (scripts/full_align.py): the agent writes them after its words.
 
 Per clause line:
-    §<verse>.<line> L<level> <MACULA clause rule>  [speech: <speaker>]   the line is (in) a quotation by that speaker
-                                                    (Clear's MACULA Quotation and Speaker Data, CC BY 4.0)
+    §<verse>.<line> L<level> <MACULA clause rule>  [speech: <speaker>]   the line is (in) a quotation by that speaker;
+                                                    [speech 2: <speaker>, inside <outer speaker>'s] a quotation inside one
+                                                    (bcv-commons/hebrew-speaker-layer, CC BY 4.0, on the Hebrew; without
+                                                    it Clear's MACULA Quotation and Speaker Data, one level, CC BY 4.0)
      <n> <Hebrew> <gloss> [<morphology for verbs; the referent for pronouns and suffixes>] · ...
      BSB: the BSB words that render these tokens, each with its token numbers (word^n), gaps as …
      had: what this project already wrote for these lexemes (earlier chapters' .align), the store's decisions,
@@ -242,15 +244,59 @@ def build(pname, code, ch, level=None):
             continue
         ln = line_of.get(t["key"], (None, None))
         lines.setdefault((t["v"], ln[0]), []).append(t)
+    # the speaker layer: each token's segment (its bcv-query layout line) -> the quotation it stands in, with its level
+    seg_of, frame = {}, None
+    if con.execute("select count(*) from sqlite_master where name='speaker_segments'").fetchone()[0]:
+        segs = {r["line"]: r for r in con.execute("select * from speaker_segments where book=? and ch=?", (book, ch))}
+        quot = {}
+        for r in con.execute("select l.key, l.line from layout l join tokens t on t.key=l.key where t.book=? and t.ch=? "
+                             "and l.layout='bcv-query'", (book, ch)):
+            if r["line"] in segs:
+                seg_of[r["key"]] = segs[r["line"]]
+        frames = collections.Counter(r["frame"] for r in segs.values())
+        if segs and frames.most_common(1)[0][0]:
+            frame = frames.most_common(1)[0][0]
+
+        def chain(qid):
+            """The speakers from this quotation outward: [inner, outer, ...]."""
+            names = []
+            while qid:
+                if qid not in quot:
+                    quot[qid] = con.execute("select speaker, parent from speaker_quotations where id=?", (qid,)).fetchone()
+                q = quot[qid]
+                if not q:
+                    break
+                names.append(q["speaker"] or "?")
+                qid = q["parent"]
+            return names
+    if seg_of and not lean:
+        out[2:2] = ["# Speech: [speech: X] a quotation by X; [speech 2: Y, inside X's] Y quoted inside X's speech (inner"
+                    " quotation marks). From the Hebrew Bible Speaker Layer (bcv-commons, CC BY 4.0; with Clear Bible's MACULA"
+                    " Quotation and Speaker Data, CC BY 4.0, and SIL Glyssen, MIT)."] + (
+            [f"# Frame: the chapter as a whole is spoken by {frame} (a psalm, a first-person account): that is not a"
+             " quotation, so no quotation marks for it; a [speech] inside it is one."] if frame else [])
     has_sp = con.execute("select count(*) from sqlite_master where name='speakers'").fetchone()[0]
     booknum = list(BY_CODE).index(code) + 1
     spans = []
-    if has_sp:  # the quotations touching this chapter (verses in English numbering, words as MACULA keys)
+    if has_sp and not seg_of:  # Clear's spans, when the speaker layer isn't here  # the quotations touching this chapter (verses in English numbering, words as MACULA keys)
         lo, hi = booknum * 1000000 + max(ch - 1, 0) * 1000, booknum * 1000000 + (ch + 2) * 1000
         spans = con.execute("select speaker, word_start, word_end from speakers where stop >= ? and start <= ?", (lo, hi)).fetchall()
 
     def speaking(group):
-        """Who speaks in this clause line: the quotations whose word span covers one of its tokens."""
+        """Who speaks in this clause line: the speaker layer's segment that has most of its tokens (the line is the
+        drafting layout's, the segments bcv-query's), else the Clear quotations whose word span covers one of its tokens."""
+        if seg_of:
+            c = collections.Counter(seg_of[t["key"]]["line"] for t in group if t["key"] in seg_of)
+            if not c:
+                return ""
+            r = next(seg_of[t["key"]] for t in group if t["key"] in seg_of and seg_of[t["key"]]["line"] == c.most_common(1)[0][0])
+            if not r["level"]:
+                return ""
+            names = chain(r["quotation"])
+            part = " (part of the line)" if r["share"] < 0.5 else ""
+            if r["level"] == 1 or len(names) < 2:
+                return f"  [speech: {names[0] if names else r['speaker']}]{part}"
+            return f"  [speech {r['level']}: {names[0]}, inside " + ", inside ".join(f"{n}'s" for n in names[1:]) + f"]{part}"
         who_ = [sp for sp, a, b in spans if a and b and any(a <= t["key"] <= b for t in group)]
         return f"  [speech: {', '.join(dict.fromkeys(who_))}]" if who_ else ""
     seen_v, k = None, 0

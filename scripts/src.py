@@ -12,7 +12,7 @@ Hebrew, orig/heb.sqlite, from:
   - the BSB Translation Tables (full-alignments-manual eng_BSB+manual+bsb-tables, CC0): which BSB words render each
     token (positions in the BSB verse);
   - the two clause layouts on this machine: orig/heb-bhsa (BHSA 2021, CC BY-NC: local only) and orig/heb-bcv-query
-    (+ -keys; hebrew-clause-layout v0.22, CC BY-SA): the line of each token in each layout.
+    (+ -keys; hebrew-clause-layout v0.35, CC BY-SA): the line of each token in each layout.
 
 Tables:
   tokens(key, book, ch, v, word, n, kind, ord, text, after, lemma, lexeme, strong, class, pos, morph, type, stem,
@@ -26,6 +26,9 @@ Tables:
   refs(key, kind, target)          participantref / subjref / frame roles (A0, A1, AA): who a token refers to
   bsb(key, positions)              BSB token positions ("3 4")
   layout(key, layout, line, level) the token's line in a clause layout (line = the chapter's line number, 0-based)
+  speaker_segments(book, ch, line, quotation, level, speaker, share, frame)   the speaker layer per bcv-query segment
+                                   (line as in layout; level 0 = no quotation, 2+ = inside another quotation)
+  speaker_quotations(id, level, parent, speaker, divine, basis, first, last, inquit)   its quotations
   lxx(lexeme, greekstrong, greek, n)   the per-token LXX equivalents counted over the whole build (the bridge)
   meta(name, value)
 
@@ -39,6 +42,9 @@ orig/grc-rp (RP 2018, the MSB's); how = same | spelling | moved, a variant token
     python3 scripts/src.py speakers                  who speaks where: Clear Bible's MACULA Quotation and Speaker Data
                                                      (CC BY 4.0; with SIL Glyssen / FCBH character data, MIT), one span
                                                      per quotation with its first and last MACULA word, via shoresh
+    python3 scripts/src.py speaker-layer DIR         who speaks where, on the Hebrew: an unpacked bcv-commons/hebrew-speaker-layer
+                                                     release (CC BY 4.0; quotations inside quotations, frames), keyed on the
+                                                     bcv-query layout's segments (needs its layout rows; setup.py pins it)
     python3 scripts/src.py layouts [code ...] [--layout bhsa|bcv-query]   (re)build the layout rows from the layouts here
     python3 scripts/src.py map [code ...]            (re)build the BGB/RP -> MACULA mapping in orig/grc.sqlite
     python3 scripts/src.py export-open DIR           the publishable cache: no UBS columns, no BHSA (manifest.json)
@@ -285,7 +291,7 @@ def export_open(out):
             con.execute("attach database ? as o", (lay,))
             con.execute("create table o.layout as select * from layout where layout='bcv-query'")
             con.execute("create table o.meta(name text primary key, value text)")
-            con.execute("insert into o.meta values('licence', 'CC BY-SA 4.0: bcv-commons/hebrew-clause-layout v0.22 "
+            con.execute("insert into o.meta values('licence', 'CC BY-SA 4.0: bcv-commons/hebrew-clause-layout v0.35 "
                         "(MACULA Hebrew, UHB); keys are MACULA Hebrew word ids')")
             con.commit()
             con.execute("detach database o")
@@ -587,6 +593,40 @@ def stats():
     print("meta", con.execute("select * from meta").fetchall())
 
 
+def speaker_layer(rel):
+    """The speaker layer (bcv-commons/hebrew-speaker-layer, an unpacked release): speaker_segments and speaker_quotations.
+    Its segments are the bcv-query clause layout's (segment n of a chapter = layout line n - 1), so the words of a segment
+    are the tokens with that bcv-query layout line. Licence CC BY 4.0 (with Clear Bible's data, CC BY 4.0, and Glyssen, MIT)."""
+    import csv, glob
+    con = sqlite3.connect(DB)
+    if not con.execute("select count(*) from layout where layout='bcv-query'").fetchone()[0]:
+        raise SystemExit("speaker-layer: no bcv-query layout rows in orig/heb.sqlite (setup.py --heb bcv-query, then src.py layouts)")
+    tsv = lambda f: csv.DictReader((l for l in open(f, encoding="utf-8") if not l.startswith("#")), delimiter="\t")
+    con.execute("drop table if exists speaker_segments")
+    con.execute("drop table if exists speaker_quotations")
+    con.execute("create table speaker_segments(book text, ch int, line int, quotation text, level int, speaker text, "
+                "share real, frame text)")
+    con.execute("create table speaker_quotations(id text primary key, level int, parent text, speaker text, divine int, "
+                "basis text, first text, last text, inquit text)")
+    n = 0
+    for f in sorted(glob.glob(os.path.join(rel, "segments", "*.tsv"))):
+        book = os.path.basename(f)[:-4]
+        rows = [(book, int(r["chapter"]), int(r["seg"]) - 1, r["quotation"] or None, int(r["level"] or 0), r["speaker"] or None,
+                 float(r["share"] or 0), r.get("frame") or None) for r in tsv(f)]
+        con.executemany("insert into speaker_segments values(?,?,?,?,?,?,?,?)", rows)
+        n += len(rows)
+    q = [(r["id"], int(r["level"] or 1), r["parent"] or None, r["speaker"] or None, int(r["divine"] == "Y"), r["basis"] or None,
+          r["first"], r["last"], r["inquit"] or None) for r in tsv(os.path.join(rel, "quotations.tsv"))]
+    con.executemany("insert into speaker_quotations values(?,?,?,?,?,?,?,?,?)", q)
+    con.execute("create index if not exists speaker_segments_line on speaker_segments(book, ch, line)")
+    con.execute("insert or replace into meta values('speaker_layer', ?)", (
+        f"Hebrew Bible Speaker Layer ({os.path.basename(os.path.normpath(rel)).replace('hebrew-speaker-layer-', '')}), "
+        "bcv-commons, CC BY 4.0; built on MACULA Quotation and Speaker Data (Clear Bible, CC BY 4.0) with SIL Glyssen / FCBH "
+        "character data (MIT)",))
+    con.commit()
+    print(f"speaker layer: {n} segments, {len(q)} quotations")
+
+
 def main():
     a = sys.argv[1:]
     if not a:
@@ -612,6 +652,8 @@ def main():
         print("orig/grc.sqlite: map (BGB, RP -> MACULA keys) rebuilt")
     elif a[0] == "speakers":
         speakers()
+    elif a[0] == "speaker-layer":
+        speaker_layer(os.path.abspath(a[1]))
     elif a[0] == "export-open":
         export_open(os.path.abspath(a[1]))
     elif a[0] == "show":

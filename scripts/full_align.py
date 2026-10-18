@@ -18,7 +18,7 @@ Working file, one per drafted chapter, next to the draft (export/<project>/<code
   makes a stale file visible: when the draft changes, its alignment no longer matches.
 
 The published layer, one file set per book, as on Hugging Face (`export` below):
-    <iso[0]>/<iso>/<edition>+draft+bsb-add-books/<BOOK>_<hash>.json        main strings, parallel to _index/<BOOK>_lexemes.json
+    <iso[0]>/<iso>/<edition>+auto+bsb-add-books/<BOOK>_<hash>.json        main strings, parallel to _index/<BOOK>_lexemes.json
                                                  <BOOK>_<hash>.meta.json   channels fn, wp, fp (wx, rows, off: null)
                                                  _layer.json               attribution and the profile table
   <hash> = the last 5 hex characters of compact-alignments' book_content_hash: sha256 of "{c}:{v}:{text}" lines
@@ -36,10 +36,14 @@ from it, mark each verse it checked with profile b, then `check`.
 The tagged format (an agent's interim file, `<code>NNN.tagged`, git-ignored; internal-docs plan, section 6): the draft
 in its usual layout with the Hebrew token numbers right after the letters of each word, `Synerzyt^2,3, wo^4 d^5`.
 The numbers count every token of the verse in the compact-alignments index (content and function) in source order,
-from 0 (`numbering`); an untagged word renders no token of its own.
+from 0 (`numbering`). Two more marks (2026-10-16, with lexeme-aligner): `^-7` between words, a token with no target
+word at its slot (at the verse's end: no particular slot), and `word^+5` / `word^+`, a word added for token 5 or for the
+grammar. An unmarked word or token is not decided. In the .align they become lexeme-aligner's notation: `!ords` and
+`u<ord>[@pos]` (the @ only where the slot differs from the default rule: after the last target word of the nearest
+preceding linked token), and `+pos[>ord]` at the end of fn.
     python3 scripts/full_align.py tag <project> <code> <ch>     prose + .align -> <code>NNN.tagged
     python3 scripts/full_align.py split <project> <code> <ch>   <code>NNN.tagged -> prose .txt + .align (profile b),
-                                                                and the content tokens left untagged per verse
+                                                                and the content tokens left undecided per verse
 """
 import functools, hashlib, json, os, re, sys, unicodedata, urllib.request
 
@@ -57,22 +61,48 @@ PROFILES = {"a": {"method": "script", "score": None, "prior": None, "extra": Non
             "b": {"method": "agent", "score": None, "prior": None, "extra": None, "attr": {}}}
 
 
+def _download(url, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=300) as r:
+                data = r.read()
+            break
+        except OSError:
+            if attempt == 3:
+                raise
+    open(path + ".part", "wb").write(data)  # never leave a half-written cache file
+    os.replace(path + ".part", path)
+
+
+@functools.lru_cache(maxsize=None)
+def source_index():
+    """compact-alignments' _index/_source.json: per book the SHA-256 of each index file, and spine_index_sha256 (what a
+    layer records it was built against). Re-read at most once a day."""
+    import time
+    path = os.path.join(INDEX, "_source.json")
+    if not os.path.exists(path) or time.time() - os.path.getmtime(path) > 24 * 3600:
+        try:
+            _download(f"{HF_INDEX}/_source.json", path)
+        except OSError:
+            if not os.path.exists(path):
+                return {}
+    return json.load(open(path, encoding="utf-8"))
+
+
 @functools.lru_cache(maxsize=None)
 def index(book, kind):
-    """_index/<BOOK>_<kind>.json (lexemes, keys, fn, fn_keys), downloaded once."""
+    """_index/<BOOK>_<kind>.json (lexemes, keys, fn, fn_keys), downloaded once and checked against the published
+    _source.json: a cached file whose SHA-256 differs is downloaded again (the index is republished now and then, and a
+    stale copy would give wrong ordinals without any error)."""
+    import hashlib
     path = os.path.join(INDEX, f"{book}_{kind}.json")
+    want = (source_index().get("books", {}).get(book) or {}).get(f"{kind}_sha256")
+    if os.path.exists(path) and want and hashlib.sha256(open(path, "rb").read()).hexdigest() != want:
+        print(f"  {book}_{kind}.json: the published index changed; downloading it again", file=sys.stderr)
+        os.remove(path)
     if not os.path.exists(path):
-        os.makedirs(INDEX, exist_ok=True)
-        for attempt in range(4):
-            try:
-                with urllib.request.urlopen(urllib.request.Request(f"{HF_INDEX}/{book}_{kind}.json", headers=UA), timeout=300) as r:
-                    data = r.read()
-                break
-            except OSError:
-                if attempt == 3:
-                    raise
-        open(path + ".part", "wb").write(data)  # never leave a half-written cache file
-        os.replace(path + ".part", path)
+        _download(f"{HF_INDEX}/{book}_{kind}.json", path)
     return json.load(open(path, encoding="utf-8"))
 
 
@@ -124,10 +154,45 @@ def span(ids):
     return ",".join(map(str, ids))
 
 
+def ids_of(sp):
+    """"4-5,9" -> [4, 5, 9]"""
+    ids = []
+    for part in (sp or "").split(","):
+        if "-" in part and not part.startswith("-"):
+            a, b = part.split("-")
+            ids += range(int(a), int(b) + 1)
+        elif part.lstrip("-").isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def decisions(s):
+    """The decision entries of a main or fn string (lexeme-aligner's notation, 2026-10-16): !<ords> (no target word),
+    u<ord>[@<pos>] (untranslated, its slot), e<ord>[@<pos>] (rendered elsewhere), +<pos>[><ord>] (added target words, in
+    fn; >ord a content token, >f<ord> a function token).
+    -> {"none": [ord], "u": {ord: slot|None}, "e": {ord: slot|None}, "plus": [(pos, ("c"|"f", ord) | None)]}"""
+    out = {"none": [], "u": {}, "e": {}, "plus": []}
+    for e in (s or "").split():
+        if e.startswith("!"):
+            out["none"] += ids_of(e[1:])
+        elif e[0] in "ue" and e[1:2].isdigit():
+            for item in e[1:].split(","):
+                o, _, slot = item.partition("@")
+                out[e[0]][int(o)] = int(slot) if slot else None
+        elif e.startswith("+"):
+            for item in e[1:].split(","):
+                pos, _, o = item.partition(">")
+                owner = (("f", int(o[1:])) if o.startswith("f") else ("c", int(o))) if o else None
+                out["plus"] += [(i, owner) for i in ids_of(pos)]
+    return out
+
+
 def parse(s):
-    """"ord:span ..." -> {ord: [positions]}."""
+    """"ord:span ..." -> {ord: [positions]}; the decision entries (!, u, e, +; decisions()) are left out."""
     out = {}
     for e in (s or "").split():
+        if not e[:1].isdigit():
+            continue
         o, _, sp = e.partition(":")
         ids = []
         for part in sp.split(","):
@@ -195,7 +260,7 @@ def chapters(pname, only=None, ch=None):
 def check(pname, only=None, quiet=False, ch=None):
     """Problems (an ordinal or a position out of range) and warnings (a chapter without alignment, or stale: the
     draft changed since; rerun scripts/bridge_align.py or the agent's alignment step)."""
-    problems, warns, tot = [], [], {"c": [0, 0], "f": [0, 0], "t": [0, 0]}
+    problems, warns, tot = [], [], {"c": [0, 0], "f": [0, 0], "t": [0, 0], "d": [0, 0], "v": [0, 0]}
     shared = 0  # function links whose words a content link also claims: a sign of over-linking (and with וַ -> the verb),
     # though some is right (a Danish article written as an ending renders noun and הַ alike)
     for code, ch, draft, ap in chapters(pname, only, ch):
@@ -209,6 +274,7 @@ def check(pname, only=None, quiet=False, ch=None):
             warns.append(f"{name}: stale (the draft changed since it was aligned)")
             continue
         book = code.upper()
+        slotless = slotted = 0
         for v, t in verses:
             ref = f"{book} {ch}:{v}"
             ntok = len(tokenize(t))
@@ -225,23 +291,52 @@ def check(pname, only=None, quiet=False, ch=None):
                 bad = [i for i in ids if i >= ntok]
                 if bad:
                     problems.append(f"{name}: {ref}: target position {bad[0]} out of range ({ntok} tokens)")
+            dm, df = decisions(m), decisions(f)
+            slotless += len(dm["none"]) + len(df["none"])
+            slotted += len(dm["u"]) + len(df["u"]) + len(dm["e"]) + len(df["e"])
+            none_c = set(dm["none"]) | set(dm["u"]) | set(dm["e"])
+            none_f = set(df["none"]) | set(df["u"]) | set(df["e"])
+            for o, lim, kind in [(o, nc, "c") for o in none_c] + [(o, nf, "f") for o in none_f]:
+                if o >= lim:
+                    problems.append(f"{name}: {ref}: ordinal {kind}{o} (no target word) out of range ({lim})")
+            plus = {pos for pos, _ in df["plus"] + dm["plus"]}
+            if any(pos >= ntok for pos in plus):
+                problems.append(f"{name}: {ref}: an added target word out of range ({ntok} tokens)")
             content = {i for ids in M.values() for i in ids}
             shared += sum(1 for ids in F.values() if ids and all(i in content for i in ids))
             tot["c"][0] += len(M); tot["c"][1] += nc
             tot["f"][0] += len(F); tot["f"][1] += nf
-            tot["t"][0] += len({i for ids in list(M.values()) + list(F.values()) for i in ids}); tot["t"][1] += ntok
+            covered = {i for ids in list(M.values()) + list(F.values()) for i in ids} | plus
+            tot["t"][0] += len(covered); tot["t"][1] += ntok
+            decided = len(set(M) | none_c) + len(set(F) | none_f)
+            tot["d"][0] += decided; tot["d"][1] += nc + nf
+            tot["v"][0] += decided == nc + nf and len(covered) >= ntok; tot["v"][1] += 1
+        if slotless >= 5 and slotless * 3 > slotless + slotted:   # "no particular place" should be rare
+            warns.append(f"{name}: {slotless} of {slotless + slotted} unrendered tokens have no slot (at the verse end); "
+                         "almost every one has a place in the target")
     if not quiet:
         pc = lambda k: f"{tot[k][0]}/{tot[k][1]} ({100 * tot[k][0] / max(tot[k][1], 1):.0f}%)"
         print(f"{pname}: content tokens linked {pc('c')}, function tokens {pc('f')} ({100 * shared / max(tot['f'][0], 1):.0f}% "
               "on a content word's words: compare within a language; high where affixes render them, else over-linking), "
-              f"draft tokens covered {pc('t')}; "
+              f"draft tokens covered {pc('t')}; source tokens decided (linked or marked as having no word) {pc('d')}, "
+              f"verses complete {pc('v')}; "
               + (f"{len(problems)} problems" if problems else "ok") + (f", {len(warns)} warnings" if warns else ""))
         for p in problems[:30] + [f"warn {w}" for w in warns[:30]]:
             print("  " + p)
     return problems
 
 
-TAG = re.compile(r"\^(\d+(?:,\d+)*)")
+TAG = re.compile(r"\^(\d+(?:,\d+)*)")                    # word^5, word^5,6: the word renders these tokens
+ADDED = re.compile(r"\^\+(\d+)?")                         # word^+5: added for token 5; word^+: added for the grammar
+DROP = re.compile(r"\^-(\d+(?:,\d+)*)")                   # ^-7 between words: no word for token 7, its slot is here;
+                                                           #   at the verse's end: no word, no particular slot
+
+
+def strip_tags(text):
+    """The tagged text without its marks: the prose draft."""
+    text = re.sub(r"[ \t]+\^-\d+(?:,\d+)*", "", text)                    # a drop marker after a word or a space
+    text = re.sub(r"(?m)^\^-\d+(?:,\d+)*[ \t]*", "", text)              # one at the start of a line
+    return TAG.sub("", ADDED.sub("", text))
 VMARK = re.compile(r"(?<![\w>.])v(\d+)(?=\s)")
 
 
@@ -255,6 +350,20 @@ def numbering(book, ref):
             if parts:
                 toks.append((parts[0], c, o, parts))
     return [(n, c, o, parts) for n, (_, c, o, parts) in enumerate(sorted(toks))]
+
+
+def word_groups(text, toks):
+    """The written words of a file: runs of tokens of one verse with no whitespace between them ("man’s" = man + s,
+    "daughters-in-law" = three tokens). -> {(verse, start): [(verse, start) of every token of its word, in order]}"""
+    groups, cur = {}, []
+    for t in toks:
+        if cur and cur[-1][0] == t[0] and not re.search(r"\s", text[cur[-1][2]:t[1]]):
+            cur.append(t)
+        else:
+            cur = [t]
+        for u in cur:
+            groups[(u[0], u[1])] = [(x[0], x[1]) for x in cur]
+    return groups
 
 
 def file_tokens(text):
@@ -292,7 +401,9 @@ def file_tokens(text):
 
 
 def tag(pname, code, ch):
-    """prose draft + its .align -> the tagged text (verse-local numbers after the words), and the profile per verse."""
+    """prose draft + its .align -> the tagged text (verse-local numbers after the words: ^n links, ^+n / ^+ added words,
+    ^-n unrendered tokens at their slot, or at the verse's end when they have none), and the profile per verse.
+    tag -> split gives the .align back; a slot equal to the default rule comes back without its @, as stored."""
     draft = os.path.join(ROOT, "export", pname, code, f"{code}{ch:03d}.txt")
     text = open(draft, encoding="utf-8").read()
     h, rows = read_chapter(draft[:-4] + ".align")
@@ -300,63 +411,180 @@ def tag(pname, code, ch):
         raise SystemExit(f"{os.path.relpath(draft, ROOT)}: the .align is stale; realign first")
     book = code.upper()
     toks = file_tokens(text)
-    nums = {}  # (verse, token index) -> [n]
+    nums, plus, drop_at, drop_end = {}, {}, {}, {}   # (verse, token index) -> [n] | "+n"/"+" | [n]; verse -> [n]
     for v, (m, f, _) in rows.items():
-        back = {(c, o): n for n, c, o, _ in numbering(book, f"{book} {ch}:{v}")}
+        numb = numbering(book, f"{book} {ch}:{v}")
+        back = {(c, o): n for n, c, o, _ in numb}
+        linked = {}
         for c, st in (("c", m), ("f", f)):
             for o, ids in parse(st).items():
+                linked.setdefault(back[(c, o)], []).extend(ids)
                 for i in ids:
                     nums.setdefault((v, i), []).append(back[(c, o)])
-    out, last, k = [], 0, {}
+        for c, st in (("c", m), ("f", f)):
+            d = decisions(st)
+            for o in d["none"]:
+                drop_end.setdefault(v, []).append(back[(c, o)])
+            for kind in ("u", "e"):
+                for o, slot in d[kind].items():
+                    n = back[(c, o)]
+                    drop_at.setdefault((v, default_slot(n, linked) if slot is None else slot), []).append(n)
+            for pos, o in d["plus"]:
+                plus[(v, pos)] = f"+{back[o]}" if o is not None else "+"
+                if o is not None:                      # the default slot rule counts the + words that name a token
+                    linked.setdefault(back[o], []).append(pos)
+    out, last, k, first_of = [], 0, {}, {}
+    vlast = {}
+    for v, a, b in toks:
+        vlast[v] = b
+    pos = {}
+    for v, a, b in toks:
+        pos[(v, a)] = k.get(v, 0)
+        k[v] = pos[(v, a)] + 1
+    group = word_groups(text, toks)
+
+    def mark(v, i):
+        return ("n", tuple(sorted(set(nums[(v, i)])))) if (v, i) in nums else ("+", plus[(v, i)]) if (v, i) in plus else None
+
+    def same_word_mark(v, a):
+        """the token is not its written word's last, and every token of the word has the same mark: write it once, after
+        the word (split gives it to every token of the word)"""
+        g = group[(v, a)]
+        if g[-1] == (v, a):
+            return False
+        ms = {mark(v, pos[x]) for x in g}
+        return len(ms) == 1 and None not in ms and not any((v, pos[x]) in drop_at for x in g[:-1])
+    k = {}
     for v, a, b in toks:
         i = k.get(v, 0)
         k[v] = i + 1
+        if i == 0 and (v, -1) in drop_at:            # slot -1: right before the verse's first word
+            out.append(text[last:a] + "^-" + ",".join(map(str, sorted(drop_at[(v, -1)]))) + " ")
+            last = a
         out.append(text[last:b])
+        if same_word_mark(v, a):
+            last = b
+            continue
         if (v, i) in nums:
             out.append("^" + ",".join(map(str, sorted(set(nums[(v, i)])))))
+        elif (v, i) in plus:
+            out.append("^" + plus[(v, i)])
+        if (v, i) in drop_at:
+            out.append(" ^-" + ",".join(map(str, sorted(drop_at[(v, i)]))))
+        if b == vlast[v] and v in drop_end:            # no particular slot: at the verse's end
+            out.append(" ^-" + ",".join(map(str, sorted(drop_end[v]))))
         last = b
     out.append(text[last:])
     return "".join(out), {v: r[2] for v, r in rows.items()}
 
 
+def default_slot(n, linked):
+    """lexeme-aligner's default slot of an unrendered source token n: after the last target word of the nearest preceding
+    source token that shows target words (-1: the verse start). linked = {source number: [target positions]}: its links
+    and the + words that name it (`+pos>ord`), all a reader of the strings sees (their compare_slots.py)."""
+    before = [m for m in linked if m < n and linked[m]]
+    return max(linked[max(before)]) if before else -1
+
+
 def split(pname, code, ch, profile="b", write=True, tagged=None):
-    """The tagged file -> the prose draft (tags removed) and the .align (profile `profile`); returns the report:
-    problems (tags in the wrong place, unknown numbers) and, per verse, the content tokens left untagged."""
+    """The tagged file -> the prose draft (marks removed) and the .align (profile `profile`) in lexeme-aligner's notation:
+    links; !/u for source tokens with no target word (u with @slot only where it differs from the default rule); + for
+    added target words (in fn; >ord: the content token they serve). Returns the report: problems (marks in the wrong
+    place, unknown numbers, a token both linked and dropped), per verse the content tokens left undecided, and the rows."""
     base = os.path.join(ROOT, "export", pname, code, f"{code}{ch:03d}")
     tagged = tagged if tagged is not None else open(base + ".tagged", encoding="utf-8").read()
     problems, untagged = [], {}
-    prose = TAG.sub("", tagged)
+    prose = strip_tags(tagged)
     if "^" in prose:
         n = prose.index("^")
-        problems.append(f"a ^ not after a word or not followed by numbers: …{prose[max(0, n - 20):n + 10]}…")
+        problems.append("a ^ that is no mark (^5 or ^+5 / ^+ right after a word, ^-5 between words): "
+                        f"…{prose[max(0, n - 20):n + 10]}…")
     toks = file_tokens(tagged)
-    ends = {b: (v, a) for v, a, b in toks}
+    ends = {b_: (v, a_) for v, a_, b_ in toks}
     idx, k = {}, {}
-    for v, a, b in toks:
-        idx[(v, a)] = k.get(v, 0)
-        k[v] = idx[(v, a)] + 1
+    for v, a_, b_ in toks:
+        idx[(v, a_)] = k.get(v, 0)
+        k[v] = idx[(v, a_)] + 1
     book = code.upper()
-    links = {}  # verse -> {(c, o): [token index]}
+    nums = {}
+
+    def num(v):
+        if v not in nums:
+            nums[v] = {n: (c, o) for n, c, o, _ in numbering(book, f"{book} {ch}:{v}")}
+        return nums[v]
+    links, added, drops = {}, {}, {}           # verse -> {(c, o): [pos]} | [(pos, n|None)] | [(n, slot|None)]
+    group = word_groups(tagged, toks)
+    own = {ends[m.start()] for rx in (TAG, ADDED) for m in rx.finditer(tagged) if m.start() in ends}
+
+    def word_of(v, a_):
+        """the token and the tokens of its written word that carry no mark of their own"""
+        return [g for g in group[(v, a_)] if g == (v, a_) or g not in own]
     for m in TAG.finditer(tagged):
         if m.start() not in ends:
             problems.append(f"tag ^{m[1]} not right after the letters of a word: …{tagged[max(0, m.start() - 20):m.end()]}…")
             continue
-        v, a = ends[m.start()]
-        num = {n: (c, o) for n, c, o, _ in numbering(book, f"{book} {ch}:{v}")}
+        v, a_ = ends[m.start()]
         for n in map(int, m[1].split(",")):
-            if n not in num:
-                problems.append(f"v{v}: ^{n} is not a token number of the verse (0-{len(num) - 1})")
+            if n not in num(v):
+                problems.append(f"v{v}: ^{n} is not a token number of the verse (0-{len(num(v)) - 1})")
                 continue
-            links.setdefault(v, {}).setdefault(num[n], []).append(idx[(v, a)])
+            for g in word_of(v, a_):
+                links.setdefault(v, {}).setdefault(num(v)[n], []).append(idx[g])
+    for m in ADDED.finditer(tagged):
+        if m.start() not in ends:
+            problems.append(f"^+{m[1] or ''} not right after the letters of a word: …{tagged[max(0, m.start() - 20):m.end()]}…")
+            continue
+        v, a_ = ends[m.start()]
+        n = int(m[1]) if m[1] else None
+        if n is not None and n not in num(v):
+            problems.append(f"v{v}: ^+{n}: {n} is not a token number of the verse")
+            continue
+        for g in word_of(v, a_):
+            added.setdefault(v, []).append((idx[g], n))
+    marks = sorted((mm.start(), int(mm[1])) for mm in VMARK.finditer(tagged))
+    for m in DROP.finditer(tagged):
+        vm = [vv for at, vv in marks if at < m.start()]
+        if not vm:
+            problems.append(f"^-{m[1]} before the first verse")
+            continue
+        v = vm[-1]
+        in_v = [t for t in toks if t[0] == v]
+        before = [t for t in in_v if t[2] <= m.start()]
+        after = [t for t in in_v if t[1] >= m.end()]
+        slot = None if not after else (idx[(v, before[-1][1])] if before else -1)    # at the verse's end: no slot
+        for n in map(int, m[1].split(",")):
+            if n not in num(v):
+                problems.append(f"v{v}: ^-{n}: {n} is not a token number of the verse")
+                continue
+            drops.setdefault(v, []).append((n, slot))
     if write and not problems:
         open(base + ".txt", "w", encoding="utf-8").write(prose)
     verses = draft_texts(base + ".txt") if write and not problems else None
     rows = []
     for v in sorted({t[0] for t in toks}):
-        L = links.get(v, {})
-        fmt = lambda c: " ".join(f"{o}:{span(ids)}" for (cc, o), ids in sorted(L.items()) if cc == c)
-        rows.append((v, fmt("c"), fmt("f"), profile if L else "a"))
-        miss = [n for n, c, o, _ in numbering(book, f"{book} {ch}:{v}") if c == "c" and (c, o) not in L]
+        L, A, D = links.get(v, {}), added.get(v, []), drops.get(v, [])
+        linked = {n: list(L[co]) for n, co in num(v).items() if co in L}
+        for pos, n in A:
+            if n is not None:
+                linked.setdefault(n, []).append(pos)
+        both = sorted({n for n, _ in D} & {n for n, co in num(v).items() if co in L})
+        if both:
+            problems.append(f"v{v}: token {', '.join(map(str, both))} both linked and dropped (^-)")
+        parts = {"c": [f"{o}:{span(ids)}" for (cc, o), ids in sorted(L.items()) if cc == "c"],
+                 "f": [f"{o}:{span(ids)}" for (cc, o), ids in sorted(L.items()) if cc == "f"]}
+        for c in ("c", "f"):
+            none = [num(v)[n][1] for n, slot in D if slot is None and num(v)[n][0] == c]
+            if none:
+                parts[c].append("!" + span(none))
+            u = sorted((num(v)[n][1], slot, default_slot(n, linked)) for n, slot in D if slot is not None and num(v)[n][0] == c)
+            if u:
+                parts[c].append("u" + ",".join(f"{o}@{slot}" if slot != dflt else f"{o}" for o, slot, dflt in u))
+        if A:
+            owner = lambda n: "" if n is None else f">{num(v)[n][1]}" if num(v)[n][0] == "c" else f">f{num(v)[n][1]}"
+            parts["f"].append("+" + ",".join(f"{pos}{owner(n)}" for pos, n in sorted(A, key=lambda x: x[0])))
+        rows.append((v, " ".join(parts["c"]), " ".join(parts["f"]), profile if (L or A or D) else "a"))
+        decided = {n for n, co in num(v).items() if co in L} | {n for n, _ in D}   # an added word naming n decides nothing
+        miss = [n if c == "c" else f"{n}f" for n, c, o, _ in numbering(book, f"{book} {ch}:{v}") if n not in decided]
         if miss:
             untagged[v] = miss
     if write and not problems:
@@ -457,13 +685,21 @@ TAGGED_WRITE = """
   with the package's token numbers right after the letters of each word that renders Hebrew tokens:
   `Synerzyt^2,3, wo^4 d^5 Richter^6 im^10 Land^11 regiert^4 hei^4, isch^8 e^9 Hungersnot^9 cho^8.`
   Tag as you write each clause: a word for two tokens gets both (`^2,3`); words that render one token
-  separately each get it (`wo^4 … regiert^4 hei^4`); a word added for the grammar, with no token of its own,
-  gets no tag. No tags inside notes, headings, the title or header lines. Never write the `.txt` or the `.align`
-  yourself: every change, also later, goes into the `.tagged` file."""
+  separately each get it (`wo^4 … regiert^4 hei^4`). Two more marks, both decided only now, while you write:
+  - **a token your draft renders with no word** (the narrative וַ where the language has no "and", the object marker
+    אֵת, a suffix the language leaves out): write `^-7` between the words where it would stand, as its own word
+    (`mek^2 ^-4 di^5`). Almost every such token has a place: before the word it belongs with (an object marker before
+    the object, an article before its noun, an "and" before its clause). Only a token with no place at all goes at the
+    end of the verse (`ort^10. ^-7`);
+  - **a word you add** with no token of its own: `^+5` after it when you add it for token 5 (a subject the Hebrew
+    verb implies: `Naomi^+13`), `^+` when only the grammar needs it (`did^+`).
+  Every token gets a decision: a tag on the word that renders it, or `^-`. No marks inside notes, headings, the title
+  or header lines. Never write the `.txt` or the `.align` yourself: every change, also later, goes into the `.tagged`
+  file."""
 
 TAGGED_SPLIT = (", then `python3 scripts/full_align.py split {project} {code} {chapter}`: it writes the "
-                "`{code}{nnn}.txt` and `{code}{nnn}.align` from the tagged file and lists the content tokens you left "
-                "untagged; tag each one or leave it if your draft renders it with no word (it is then left out). "
+                "`{code}{nnn}.txt` and `{code}{nnn}.align` from the tagged file and lists the tokens you left "
+                "undecided (`12f`: a function token); tag each one, or mark it `^-n` where your draft renders it with no word. "
                 "After any later change to the `.tagged` file, run both again")
 
 
@@ -492,7 +728,7 @@ def iso_and_edition(pname):
 
 def export(pname, out=None):
     iso, ed = iso_and_edition(pname)
-    layer = f"{ed}+draft+bsb-add-books"
+    layer = f"{ed}+auto+bsb-add-books"      # kind auto: made by script or agent, not hand-made gold (lexeme-aligner)
     d = os.path.join(out or os.path.join(ROOT, "build", "align"), iso[0], iso, layer)
     os.makedirs(d, exist_ok=True)
     by_book = {}
@@ -526,8 +762,11 @@ def export(pname, out=None):
         json.dump({"fn": [fn.get(r, "") for r in refs], "wp": [wp.get(r, "") for r in refs],
                    "fp": [fp.get(r, "") for r in refs], "wx": None, "rows": None, "off": None}, open(base + ".meta.json", "w", encoding="utf-8"), ensure_ascii=False)
         written.append(os.path.relpath(base + ".json", ROOT))
-    json.dump({"version": 2, "layer": layer, "kind": "draft", "has_ids": False,
-               "attribution": {"base_text": ed, "kind": "draft", "license": "CC0-1.0", "source": "bsb-add-books",
+    src = source_index()
+    json.dump({"version": 3, "lists": True, "layer": layer, "kind": "auto", "has_ids": False,   # decision lists (!, u, e, +)
+               # the _index the ordinals refer to: a file built on another one points at the wrong tokens
+               "spine_index_sha256": src.get("spine_index_sha256"),
+               "attribution": {"base_text": ed, "kind": "auto", "license": "CC0-1.0", "source": "bsb-add-books",
                                "versification": "org", "repo": "https://github.com/bcv-commons/bsb-add-books"},
                "profiles": PROFILES}, open(os.path.join(d, "_layer.json"), "w", encoding="utf-8"), indent=1)
     print(f"{pname}: {len(written)} books -> {os.path.relpath(d, ROOT)}/")
@@ -550,8 +789,8 @@ def main():
             print("problem: " + p)
         if not problems:
             print(f"wrote {a[2]}{int(a[3]):03d}.txt and .align; " + (
-                "content tokens untagged: " + "; ".join(f"v{v}: {' '.join(map(str, n))}" for v, n in untagged.items())
-                if untagged else "every content token tagged"))
+                "tokens undecided (f: a function token): " + "; ".join(f"v{v}: {' '.join(map(str, n))}" for v, n in untagged.items())
+                if untagged else "every token decided"))
         sys.exit(1 if problems else 0)
     if a[0] == "prompt":
         print(prompt(a[1], a[2], int(a[3])))
